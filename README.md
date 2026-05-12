@@ -2,8 +2,8 @@ Chrono Rift OS Project
 
 Overview
 
-Chrono Rift is an operating systems semester project built in C plus plus with SFML.
-The project uses separate Arbiter, HIP, and ASP processes with shared state and process coordination.
+Chrono Rift is an operating systems semester project built in C++
+The project uses separate Arbiter, HIP, and ASP processes ( processes defined according to the the game ) with shared state and process coordination.
 
 Project structure
 
@@ -35,7 +35,7 @@ asp.out
 
 Docker
 
-The Dockerfile installs build tools, SFML, SDL2, GLFW, ncurses, and extra packages from requirements.txt.
+The Dockerfile installs build tools, SFML and extra packages from requirements.txt.
 
 Notes
 
