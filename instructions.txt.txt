@@ -1,0 +1,322 @@
+1) No commenting in the code
+2) Simple coding style, no advanced inbuilt functions allowed (STL is allowed)
+3) You are building Chrono Rift — a multi-process tactical RPG in C++ inside Docker (Ubuntu 22.04). Use ONLY the primitives listed below. Do not introduce anything else.
+4) PROJECT IS IN SFML 
+5) Get any confusions cleared first 
+6) No enums, definitions etc. No mutexattr. Plain simple coding 
+7) Uploaded Project Statement is to be followed as a must - do not deviate 
+8) try to break the code down into more functions so to keep a proper structure and format 
+9) My roll number = 0720
+10) No #define, no #idnef etc, no sf::, no std::. Go for using namespace std and using namespace sf. No volatile allowed. No <atomic> allowed. 
+11) Do NOT use any advanced things like memset, enums etc. Use only STL if required, string library, cstring library, but no other critical things except what is allowed below. 
+12) Don't use \n, use endl
+13) No ternary operators at all. All bodies of if,else,for etc must be one line below than the respective statement. 
+
+ALLOWED PRIMITIVES (from lab manuals):
+
+Shared Memory (System V only):
+shmget(), shmat(), shmdt(), shmctl() with IPC_CREAT and IPC_RMID
+
+Threads (POSIX pthreads):
+pthread_create(), pthread_join(), pthread_exit(), pthread_self(), pthread_detach(), pthread_cancel(), pthread_attr_t, pthread_attr_init(), pthread_attr_setdetachstate(), pthread_attr_destroy(), pthread_setcancelstate(), pthread_setcanceltype()
+
+Synchronization (in shared memory):
+pthread_mutex_t, pthread_mutex_lock(), pthread_mutex_unlock(), pthread_mutex_init(), pthread_mutex_destroy()
+sem_t (unnamed), sem_init() with pshared=1, sem_wait(), sem_trywait(), sem_post(), sem_destroy()
+
+Signals:
+signal(), kill(), raise(), pause(), alarm(), sigprocmask(), sigpending(), sigsuspend(), sigset_t, sigemptyset(), sigfillset(), sigaddset(), sigdelset(), sigismember()
+Use SIGUSR1 for stun, SIGALRM for ultimate ability timer, SIGTERM for quit.
+
+Process control:
+fork(), wait(), waitpid(), getpid(), getppid(), sleep(), exit()
+
+STL allowed only for data structures:
+std::vector, std::queue, std::list, std::string etc. for game logic storage. NOT for threading/sync.
+
+GUI/TUI:
+SFML, SDL, GLFW, or ncurses. Dedicated rendering thread reads from shared memory.
+
+Only these above mentioned functions are allowed. 
+
+BANNED:
+
+    Pipes/FIFOs (pipe(), mkfifo)
+
+    std::thread, std::mutex, std::atomic, std::lock_guard, std::unique_lock, std::condition_variable, any C++ STL threading/sync wrapper
+
+    Any library not listed above that wraps OS primitives
+
+
+My Makefile:
+CXX = g++
+CXXFLAGS = -Wall -Wextra -std=c++17 -pthread
+
+LIBS = -lsfml-graphics -lsfml-window -lsfml-audio -lsfml-network -lsfml-system -lrt
+
+TARGETS = arbiter.out hip.out asp.out
+
+all: clean $(TARGETS)
+	@echo Build complete.
+
+arbiter.out: arbiter/arbiter.cpp
+	$(CXX) $(CXXFLAGS) arbiter/*.cpp -o arbiter.out $(LIBS)
+
+hip.out: hip/hip.cpp
+	$(CXX) $(CXXFLAGS) hip/*.cpp -o hip.out $(LIBS)
+
+asp.out: asp/asp.cpp
+	$(CXX) $(CXXFLAGS) asp/*.cpp -o asp.out $(LIBS)
+
+clean:
+	rm -f $(TARGETS)
+
+.PHONY: all clean
+
+Good, I have everything I need from both documents. Here is the full phase-by-phase development plan.
+
+---
+
+## Chrono Rift — SFML Build Plan (Phase-by-Phase)
+
+---
+
+### Phase 0 — Shared Memory Layout (Foundation for Everything)
+
+Before a single line of game logic, design the **entire shared memory struct** that all three processes will read/write. This is the skeleton everything else attaches to.
+
+**What to build:**
+- A single `SharedState` struct placed in one System V shared memory segment via `shmget` / `shmat`
+- Fields inside it:
+  - `EntityState players[4]` and `EntityState enemies[9]` — each holds hp, stamina, max_stamina, speed, damage, alive flag, pid, stun flag, stun_end_time
+  - `InventorySlot primary_inventory[20]` per player (weapon id or -1 per slot)
+  - `LongTermStorage` per player (a fixed-size array of weapon entries)
+  - `ArtifactTable` — 3 entries (Solar Core, Lunar Blade, Eclipse Relic), each with `held_by` pid and a free flag
+  - `ActionRequest` — the current pending action written by HIP or ASP, read and consumed by Arbiter
+  - `TurnControl` — whose turn it is (entity id), turn phase (WAITING_INPUT / ACTION_COMMITTED), timeout timestamp
+  - `GameStatus` — enemies_killed counter, game_over flag, winner flag
+  - `ActionLog entries[50]` — ring buffer of log strings for the SFML renderer
+  - Synchronization: one `pthread_mutex_t` (PTHREAD_PROCESS_SHARED) protecting the whole struct, plus one `sem_t` (pshared=1) as a "turn ready" signal between Arbiter and HIP/ASP
+
+**Outcome:** A `shared.h` header included by all three processes.
+
+---
+
+### Phase 1 — Arbiter Skeleton + Shared Memory Init
+
+**What to build (arbiter/arbiter.cpp):**
+- `shmget` with `IPC_CREAT`, attach, zero-initialize the struct
+- `pthread_mutex_init` with `PTHREAD_PROCESS_SHARED` on the embedded mutex
+- `sem_init` with `pshared=1` on the embedded semaphores
+- `fork()` twice — once to launch `./hip.out`, once to launch `./asp.out` (exec into them, passing the shmid as argv)
+- Signal setup: `signal(SIGTERM, ...)` for quit, `signal(SIGALRM, ...)` placeholder for ultimate ability
+- Main loop stub: wait for `ActionRequest` in shared memory, validate and apply it, recalculate stamina ticks, check win/lose
+- `waitpid` on both child pids for graceful shutdown
+- `shmctl(IPC_RMID)` cleanup on exit
+
+**Outcome:** Three processes start and share memory. Nothing renders yet, but the process tree is correct.
+
+---
+
+### Phase 2 — Stamina Scheduler (Core Game Loop in Arbiter)
+
+This is the most important OS-concept piece. Build it cleanly before anything else.
+
+**What to build:**
+- A loop that sleeps 1 second per tick, then adds each entity's speed to its current stamina (capped at max)
+- Detects which entity first reached max stamina — that entity "wins the turn"
+- Sets `TurnControl.active_entity` and `TurnControl.phase = WAITING_INPUT`
+- Posts the "turn ready" semaphore so HIP or ASP wakes up
+- After action is committed: resets that entity's stamina to 0, sets phase back to IDLE, resumes the tick loop
+- Skip action sets stamina to 50% instead of 0
+- All stamina reads/writes under the mutex
+
+**Outcome:** A deterministic, serial turn order driven by speed stats. Testable with printf before any GUI.
+
+---
+
+### Phase 3 — HIP (Human Interfacing Process) — Threads + Input
+
+**What to build (hip/hip.cpp):**
+- Attach to shared memory using the shmid from argv
+- `pthread_create` one thread per player character (1–4 threads)
+- Each thread loops on `sem_wait` — only the thread whose player matches `TurnControl.active_entity` proceeds; all others block
+- The active thread writes an `ActionRequest` into shared memory (action type, target id, weapon id) then posts a "action ready" semaphore
+- Input for now: read from stdin (keyboard numbers). The SFML window later will sit in a separate rendering thread — HIP does not own the window
+- On SIGUSR1 (stun): install a handler that calls `sleep(3)` then resumes — the thread's stamina was already locked by Arbiter
+
+**Outcome:** Human player can type actions that the Arbiter reads and applies.
+
+---
+
+### Phase 4 — ASP (Automated Strategic Process) — NPC Threads
+
+**What to build (asp/asp.cpp):**
+- Attach to shared memory
+- `pthread_create` one thread per enemy (2–9 threads, count from shared memory)
+- Each NPC thread: wait for its turn (same semaphore pattern as HIP), then sleep a random 0–2 seconds (AI "thinking"), then write an `ActionRequest` (Attack or Skip)
+- NPC AI: attack a random alive player, or skip
+- SIGUSR1 handler for stun: same 3-second sleep pattern
+- SIGSTOP/SIGCONT handling for ultimate ability pause (Arbiter sends SIGSTOP to asp's pid, then SIGCONT after 10 seconds via SIGALRM)
+
+**Outcome:** NPCs take turns autonomously with correct threading.
+
+---
+
+### Phase 5 — Signal Mechanics
+
+Three signal behaviors to wire up precisely:
+
+**SIGUSR1 — Stun (3 seconds):**
+- Arbiter calls `kill(target_pid, SIGUSR1)`
+- Target process (HIP or ASP) has a handler: sets a stun flag in shared memory, `sleep(3)`, clears flag
+- If it was that entity's turn when stunned, the turn is skipped; Arbiter detects the stun flag and moves on
+
+**SIGALRM — Ultimate Ability:**
+- Player triggers ultimate (has both Solar Core + Lunar Blade in inventory)
+- HIP sends signal chain: notifies Arbiter via ActionRequest
+- Arbiter does `kill(asp_pid, SIGSTOP)` to freeze ASP
+- Arbiter calls `alarm(10)` — when SIGALRM fires, handler calls `kill(asp_pid, SIGCONT)`
+
+**SIGTERM — Quit:**
+- HIP calls `kill(arbiter_pid, SIGTERM)`
+- Arbiter handler sets `game_over` flag and begins cleanup
+
+**Outcome:** All three signal mechanics working and testable.
+
+---
+
+### Phase 6 — Inventory Space Allocator
+
+This implements the memory-management analogy (first-fit contiguous allocation).
+
+**What to build (can be a shared helper `inventory.h`):**
+- `allocate_weapon(player_id, weapon_size)` — scan the 20-slot array for the first run of `weapon_size` contiguous free slots; place weapon there; return start index or -1
+- `free_weapon(player_id, slot_start)` — mark those slots as free
+- `swap_out_to_lts(player_id, slot_start)` — move weapon to long-term storage array, free the primary slots
+- `swap_in_from_lts(player_id, lts_index)` — run `allocate_weapon`; if it fails, call `swap_out` on the minimum number of weapons needed to make room (scan from the end of inventory), then retry allocation
+- Enforce Solar Core + Lunar Blade together = exactly 20 slots, no room for anything else
+
+**Outcome:** All weapon pickup, drop, and swap-in scenarios work including fragmentation edge cases.
+
+---
+
+### Phase 7 — Artifact Table + Deadlock Detection
+
+**What to build:**
+- `ArtifactTable` in shared memory: 3 entries, each with `held_by` (pid or 0) and `waiting_for` (artifact id or -1)
+- Any process acquiring an artifact: lock mutex → check table → set held_by → unlock
+- Any process waiting: set its `waiting_for` field in the table
+- **Deadlock monitor thread in Arbiter:** `pthread_create` a background thread that every 2 seconds reads the artifact table and checks for a cycle (A holds X, waits for Y; B holds Y, waits for X). If cycle found: force the lower-priority holder to release (clear its `held_by`, log the preemption to ActionLog)
+
+**Outcome:** Circular wait detected and broken automatically.
+
+---
+
+### Phase 8 — SFML Rendering Thread
+
+**What to build (inside arbiter/arbiter.cpp, or a dedicated render.h):**
+- `pthread_create` one rendering thread that owns the `sf::RenderWindow`
+- The thread loop: lock mutex → snapshot shared state → unlock → draw
+- Draw layout:
+  - Left panel: player cards (name, HP bar, stamina bar, inventory slots as colored rectangles)
+  - Right panel: enemy cards (same stats)
+  - Bottom panel: scrolling action log (last 8 entries from the ring buffer)
+  - Top bar: turn indicator ("Player 2's Turn"), game status
+- Use `sf::RectangleShape` for bars, `sf::Text` for labels (load a font from `/usr/share/fonts` or bundle one)
+- Window close event sets `game_over` flag in shared memory
+
+**Outcome:** A live updating SFML window that reflects the actual game state read from shared memory.
+
+---
+
+### Phase 9 — Input via SFML (Wire HIP to the Window)
+
+**What to build:**
+- The SFML window is owned by the rendering thread in Arbiter (since SFML windows must be on the thread that created them)
+- HIP needs to receive input — two options: (a) HIP reads stdin and the SFML window is only in Arbiter for display, or (b) Arbiter's render thread polls `sf::Event` for keypresses and writes them into a shared "input buffer" in shared memory that HIP threads read from
+- Option (b) is cleaner for SFML: add `InputBuffer` to `SharedState` — a small array of pending key/action events with a mutex
+- HIP threads do a `sem_wait` for their turn, then busy-check (with `usleep`) the input buffer until an action appears, then clear it and write the `ActionRequest`
+
+**Outcome:** Mouse/keyboard clicks in the SFML window drive player turns correctly.
+
+---
+
+### Phase 10 — Weapon Drop Mechanic + Enemy Lifecycle
+
+**What to build:**
+- When Arbiter kills an enemy (hp ≤ 0): if enemy has no weapon → randomly roll a weapon drop (50% chance, roll which weapon)
+- Write a "weapon drop event" into shared memory
+- Render thread displays a popup: "Enemy dropped Iron Halberd! Pick up? [Y/N]"
+- Player's input choice is read via the input buffer
+- If yes: run `allocate_weapon` for the player (trigger swap-out if needed)
+- If no: ASP's next alive enemy "picks it up" (just updates the enemy's weapon field, weapon won't drop when that enemy dies)
+
+**Outcome:** Full weapon economy loop working.
+
+---
+
+### Phase 11 — Eclipse Relic Dynamic Introduction
+
+**What to build:**
+- Random trigger: after 3rd enemy is killed, roll a 30% chance to introduce the Eclipse Relic into the environment
+- Arbiter sets `artifact_table[2].in_world = true` and logs it
+- Render thread shows it on screen as a pickable item
+- Next player whose turn it is gets the option to pick it up (follows same artifact locking rules as Solar Core / Lunar Blade)
+
+**Outcome:** Third artifact appears dynamically and joins the deadlock detection pool.
+
+---
+
+### Phase 12 — Win/Lose/Quit + Graceful Shutdown
+
+**What to build:**
+- Win: `enemies_killed == 10` → Arbiter sets `game_over = WIN`, sends SIGTERM to HIP and ASP pids, waits for them with `waitpid`, detaches shared memory, calls `shmctl(IPC_RMID)`, closes SFML window
+- Lose: all player hp ≤ 0 → same shutdown sequence
+- Quit: SIGTERM handler in Arbiter → same sequence
+- SFML window shows a "You Win" / "Game Over" screen for 3 seconds before exit
+
+**Outcome:** Clean process exit with no zombie processes and no leaked shared memory.
+
+---
+
+### Phase 13 — Integration Testing + Turnaround Report
+
+**What to verify:**
+- Run with 1 player, 9 enemies — check stamina math: entity with speed 30 and max 150 takes exactly 5 seconds to fill (150/30)
+- Verify stun interrupts mid-tick correctly
+- Trigger a deadlock intentionally and watch the monitor resolve it
+- Take screenshots for the PDF report
+- Write turnaround time analysis: show the arrival time formula (`arrival = max_stamina / speed` in seconds) and a table of each entity's expected first-turn time
+
+---
+
+### File Layout Summary
+
+```
+submission/
+├── Dockerfile
+├── Makefile
+├── requirements.txt
+├── arbiter/
+│   ├── arbiter.cpp       (main loop, fork, scheduler, SIGALRM, deadlock thread, SFML render thread)
+│   └── shared.h          (SharedState struct, all IPC layout — included by all three)
+├── hip/
+│   ├── hip.cpp           (player threads, input buffer reader, SIGUSR1 handler)
+│   └── shared.h          (symlink or copy)
+├── asp/
+│   ├── asp.cpp           (NPC threads, AI logic, SIGUSR1/SIGSTOP handlers)
+│   └── shared.h          (symlink or copy)
+└── report.pdf
+```
+
+---
+
+### Recommended Build Order
+
+Phase 0 → 1 → 2 → 3 → 4 → 5 → 8 (minimal renderer) → 6 → 7 → 9 → 10 → 11 → 12 → 13
+
+The key insight: **get Phase 2 working with printf output before touching SFML**. The scheduler is the hardest logic — validate it is mathematically correct first, then layer the GUI on top. SFML just reads shared memory; it doesn't need to be involved in any game logic decisions.
+
+No mutexattr. One of the things in these phases was using mutexattr but has been replaced with a semaphore implementation.
+

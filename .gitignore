@@ -1,0 +1,21 @@
+# Build outputs
+*.out
+*.o
+*.obj
+*.exe
+
+# Temporary files
+*.tmp
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor files
+.vscode/
+.idea/
+
+# Operating system files
+Thumbs.db
+.DS_Store
