@@ -8,9 +8,9 @@ TARGETS = arbiter.out hip.out asp.out
 all: clean $(TARGETS)
 	@echo Build complete.
 
-ARB_DIR = BCS\ A_24i_0720_24i_0845_HamzaSheikh_arbiter
-HIP_DIR = BCS\ A_24i_0720_24i_0845_HamzaSheikh_hip
-ASP_DIR = BCS\ A_24i_0720_24i_0845_HamzaSheikh_asp
+ARB_DIR = arbiter
+HIP_DIR = hip
+ASP_DIR = asp
 
 arbiter.out: $(ARB_DIR)/arbiter.cpp
 	$(CXX) $(CXXFLAGS) $(ARB_DIR)/*.cpp -o arbiter.out $(LIBS)

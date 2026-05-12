@@ -2,18 +2,18 @@ Chrono Rift OS Project
 
 Overview
 
-Chrono Rift is an operating systems semester project built in C++
-The project uses separate Arbiter, HIP, and ASP processes ( processes defined according to the the game ) with shared state and process coordination.
+Chrono Rift is an operating systems semester project built in C plus plus.
+The project uses separate Arbiter, HIP, and ASP processes defined according to the game with shared state and process coordination.
 
 Project structure
 
-BCS A 24i 0720 24i 0845 HamzaSheikh arbiter
+arbiter
 Arbiter source files and renderer header
 
-BCS A 24i 0720 24i 0845 HamzaSheikh hip
+hip
 HIP process source files
 
-BCS A 24i 0720 24i 0845 HamzaSheikh asp
+asp
 ASP process source files
 
 assets
